@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta
 
+import pandas as pd
 import streamlit as st
 from pykrx import stock
-import FinanceDataReader as fdr
 
 
 # ============================================================
@@ -16,7 +16,6 @@ st.set_page_config(
 )
 
 
-
 # ============================================================
 # 1. 날짜 검증
 # ============================================================
@@ -26,26 +25,22 @@ def validate_event_date(event_date: str) -> datetime:
     event_date = event_date.strip()
 
     if len(event_date) != 8:
-
         raise ValueError(
             "500억봉 발생일은 20260107처럼 숫자 8자리로 입력해주세요."
         )
 
     if not event_date.isdigit():
-
         raise ValueError(
             "날짜에는 숫자만 입력해주세요. 예: 20260107"
         )
 
     try:
-
         event_dt = datetime.strptime(
             event_date,
             "%Y%m%d"
         )
 
     except ValueError:
-
         raise ValueError(
             "올바른 날짜가 아닙니다. 예: 20260107"
         )
@@ -54,34 +49,65 @@ def validate_event_date(event_date: str) -> datetime:
 
 
 # ============================================================
-# 2. 종목 목록 조회
+# 2. stock_master.csv 읽기
 # ============================================================
 
-@st.cache_data(ttl=3600)
+@st.cache_data
 def load_stock_list():
-    """
-    KRX 전체 종목 목록을 가져온다.
-    1시간 캐시하여 매번 다시 조회하지 않음.
-    """
 
     try:
+        df = pd.read_csv(
+            "stock_master.csv",
+            dtype={
+                "Code": str,
+                "Name": str
+            }
+        )
 
-        df = fdr.StockListing(
-            "KRX"
+    except FileNotFoundError:
+        raise ValueError(
+            "stock_master.csv 파일을 찾지 못했습니다.\n\n"
+            "app.py와 같은 위치에 stock_master.csv가 있는지 확인해주세요."
         )
 
     except Exception as e:
-
         raise ValueError(
-            "종목 목록을 가져오지 못했습니다.\n\n"
+            "stock_master.csv를 읽는 중 오류가 발생했습니다.\n\n"
             f"{e}"
         )
 
-    if df is None or df.empty:
-
+    if df.empty:
         raise ValueError(
-            "KRX 종목 목록이 비어 있습니다."
+            "stock_master.csv가 비어 있습니다."
         )
+
+    required_columns = {
+        "Code",
+        "Name"
+    }
+
+    if not required_columns.issubset(
+        df.columns
+    ):
+        raise ValueError(
+            "stock_master.csv에는 "
+            "'Code'와 'Name' 컬럼이 필요합니다."
+        )
+
+    # 종목코드를 항상 6자리 문자열로 처리
+    df["Code"] = (
+        df["Code"]
+        .astype(str)
+        .str.strip()
+        .str.zfill(6)
+    )
+
+    # 종목명 공백 제거
+    df["Name"] = (
+        df["Name"]
+        .astype(str)
+        .str.strip()
+    )
 
     return df
 
@@ -96,87 +122,47 @@ def find_ticker(stock_name: str) -> str:
 
     stock_df = load_stock_list()
 
-    # FinanceDataReader 버전에 따라
-    # Symbol / Code 컬럼명이 다를 가능성 대비
-    if "Symbol" in stock_df.columns:
-
-        code_column = "Symbol"
-
-    elif "Code" in stock_df.columns:
-
-        code_column = "Code"
-
-    else:
-
-        raise ValueError(
-            "종목 목록에서 종목코드 컬럼을 찾지 못했습니다."
-        )
-
-    if "Name" not in stock_df.columns:
-
-        raise ValueError(
-            "종목 목록에서 종목명 컬럼을 찾지 못했습니다."
-        )
-
     # --------------------------------------------------------
-    # 정확히 일치
+    # 1차: 종목명 정확히 일치
     # --------------------------------------------------------
 
     exact = stock_df[
-        stock_df["Name"].astype(str)
+        stock_df["Name"]
         == stock_name
     ]
 
     if len(exact) == 1:
-
-        ticker = str(
-            exact.iloc[0][code_column]
-        ).zfill(6)
-
-        return ticker
+        return exact.iloc[0]["Code"]
 
     # --------------------------------------------------------
-    # 부분 일치
+    # 2차: 부분 일치
     # --------------------------------------------------------
 
     partial = stock_df[
-        stock_df["Name"]
-        .astype(str)
-        .str.contains(
+        stock_df["Name"].str.contains(
             stock_name,
             case=False,
-            na=False
+            na=False,
+            regex=False
         )
     ]
 
     if len(partial) == 1:
-
-        ticker = str(
-            partial.iloc[0][code_column]
-        ).zfill(6)
-
-        return ticker
+        return partial.iloc[0]["Code"]
 
     # --------------------------------------------------------
-    # 여러 종목 검색
+    # 여러 종목이 검색된 경우
     # --------------------------------------------------------
 
     if len(partial) > 1:
 
         matches = []
 
-        for _, row in partial.head(10).iterrows():
-
-            code = str(
-                row[code_column]
-            ).zfill(6)
-
-            name = str(
-                row["Name"]
-            )
-
+        for _, row in (
+            partial.head(10).iterrows()
+        ):
             matches.append(
-                f"{name} ({code})"
+                f"{row['Name']} ({row['Code']})"
             )
 
         match_text = "\n".join(
@@ -190,7 +176,8 @@ def find_ticker(stock_name: str) -> str:
         )
 
     raise ValueError(
-        f"'{stock_name}' 종목을 찾지 못했습니다."
+        f"'{stock_name}' 종목을 "
+        "stock_master.csv에서 찾지 못했습니다."
     )
 
 
@@ -205,7 +192,7 @@ def get_trading_value(
 
     # --------------------------------------------------------
     # 방법 1
-    # OHLCV 데이터에 거래대금 컬럼이 있는 경우
+    # OHLCV 결과에 거래대금 컬럼이 있으면 사용
     # --------------------------------------------------------
 
     try:
@@ -223,13 +210,10 @@ def get_trading_value(
         ):
 
             value = float(
-                one_day_df.iloc[0][
-                    "거래대금"
-                ]
+                one_day_df.iloc[0]["거래대금"]
             )
 
             if value > 0:
-
                 return (
                     value
                     / 100_000_000
@@ -266,7 +250,6 @@ def get_trading_value(
             )
 
             if value > 0:
-
                 return (
                     value
                     / 100_000_000
@@ -274,6 +257,14 @@ def get_trading_value(
 
     except Exception:
         pass
+
+    # --------------------------------------------------------
+    # 방법 3
+    # stock_master.csv의 Amount 사용
+    #
+    # CSV가 최신일 때만 의미가 있으므로
+    # 과거 사례 거래대금에는 사용하지 않음.
+    # --------------------------------------------------------
 
     return None
 
@@ -291,15 +282,12 @@ def analyze_price(
         event_date
     )
 
-    # ========================================================
-    # 종목코드 자동 검색
-    # ========================================================
-
+    # 종목코드 자동검색
     ticker = find_ticker(
         stock_name
     )
 
-    # D+10 거래일까지 충분하도록 여유 있게 조회
+    # D+10 거래일까지 충분히 확보
     end_dt = (
         event_dt
         + timedelta(days=35)
@@ -332,7 +320,10 @@ def analyze_price(
             f"{e}"
         )
 
-    if df is None or df.empty:
+    if (
+        df is None
+        or df.empty
+    ):
 
         raise ValueError(
             f"{stock_name}({ticker})의 "
@@ -342,7 +333,7 @@ def analyze_price(
     df = df.sort_index()
 
     # ========================================================
-    # 입력 날짜 확인
+    # 입력 날짜가 실제 거래일인지 확인
     # ========================================================
 
     event_date_text = (
@@ -356,7 +347,8 @@ def analyze_price(
         for idx in df.index
         if idx.strftime(
             "%Y-%m-%d"
-        ) == event_date_text
+        )
+        == event_date_text
     ]
 
     if not matching_dates:
@@ -375,7 +367,7 @@ def analyze_price(
         d0_index:
     ]
 
-    # D0 + D1~D10
+    # D0 + D+1~D+10 = 총 11개 거래일
     if len(df) < 11:
 
         raise ValueError(
@@ -387,7 +379,7 @@ def analyze_price(
     ].copy()
 
     # ========================================================
-    # D0
+    # D0 데이터
     # ========================================================
 
     d0 = df.iloc[0]
@@ -408,7 +400,10 @@ def analyze_price(
         d0["종가"]
     )
 
-    # 등락률
+    # --------------------------------------------------------
+    # 당일 등락률
+    # --------------------------------------------------------
+
     if "등락률" in df.columns:
 
         event_return = float(
@@ -419,9 +414,9 @@ def analyze_price(
 
         event_return = None
 
-    # ========================================================
-    # 거래대금
-    # ========================================================
+    # --------------------------------------------------------
+    # 당일 거래대금
+    # --------------------------------------------------------
 
     trading_value_eok = (
         get_trading_value(
@@ -431,7 +426,7 @@ def analyze_price(
     )
 
     # ========================================================
-    # 수익률 계산
+    # 수익률 계산 함수
     # ========================================================
 
     def pct_return(price):
@@ -441,6 +436,10 @@ def analyze_price(
             / d0_close
             - 1
         ) * 100
+
+    # ========================================================
+    # D+3 / D+5 / D+10
+    # ========================================================
 
     d3_return = pct_return(
         df.iloc[3]["종가"]
@@ -536,7 +535,7 @@ def analyze_price(
         break_event_low = "X"
 
     # ========================================================
-    # 결과 반환
+    # 최종 반환
     # ========================================================
 
     return {
@@ -621,7 +620,6 @@ def analyze_price(
 def format_event_return(value):
 
     if value is None:
-
         return "확인불가"
 
     return f"{value:.2f}%"
@@ -630,14 +628,13 @@ def format_event_return(value):
 def format_trading_value(value):
 
     if value is None:
-
         return "확인불가"
 
     return f"{value:,.0f}억원"
 
 
 # ============================================================
-# 7. GPT 입력용 텍스트
+# 7. GPT 입력용 최종 텍스트
 # ============================================================
 
 def make_output_text(
@@ -647,17 +644,13 @@ def make_output_text(
 
     event_return_text = (
         format_event_return(
-            result[
-                "event_return"
-            ]
+            result["event_return"]
         )
     )
 
     trading_value_text = (
         format_trading_value(
-            result[
-                "trading_value_eok"
-            ]
+            result["trading_value_eok"]
         )
     )
 
@@ -693,10 +686,8 @@ MAE 10D: {result['mae_10d']:.2f}%
 
 
 # ============================================================
-# 8. Streamlit UI
+# 8. Streamlit 입력 UI
 # ============================================================
-
-st.divider()
 
 with st.form(
     "stock_form"
@@ -744,6 +735,10 @@ if submitted:
         news_url.strip()
     )
 
+    # --------------------------------------------------------
+    # 입력값 검증
+    # --------------------------------------------------------
+
     if not stock_name:
 
         st.warning(
@@ -784,11 +779,19 @@ if submitted:
                 )
             )
 
+            # =================================================
+            # 성공 메시지
+            # =================================================
+
             st.success(
                 f"데이터 생성 완료 · "
                 f"{result['stock_name']} "
                 f"({result['ticker']})"
             )
+
+            # -------------------------------------------------
+            # 거래대금만 조회 실패한 경우
+            # -------------------------------------------------
 
             if (
                 result[
@@ -800,15 +803,15 @@ if submitted:
                 st.warning(
                     "주가 데이터는 정상 조회됐지만 "
                     "당일 거래대금은 자동 조회하지 못했습니다. "
-                    "GPT 입력문에는 확인불가로 표시했습니다."
+                    "GPT 입력문에는 '확인불가'로 표시했습니다."
                 )
 
-            st.subheader(
-                "GPTs 입력용 결과"
-            )
+            # =================================================
+            # GPT 입력용 결과만 표시
+            # =================================================
 
             st.text_area(
-                "아래 내용을 전체 복사해서 GPTs에 붙여넣으세요.",
+                "GPTs 입력용 결과",
                 value=output_text,
                 height=520
             )
