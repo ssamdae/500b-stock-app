@@ -1,4 +1,3 @@
 streamlit
 pykrx
 pandas
-git+https://github.com/FinanceData/FinanceDataReader.git
